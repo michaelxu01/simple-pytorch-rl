@@ -32,17 +32,28 @@ np.random.seed(args.seed)
 TrainingRecord = namedtuple('TrainingRecord', ['ep', 'reward'])
 Transition = namedtuple('Transition', ['s', 'a', 'r', 's_'])
 
+HIDDEN_LAYER = 64  # NN hidden layer size
+LR = 0.01
+GAMMA = 0.99
+
+INPUT_SIZE = 6
+OUTPUT_SIZE = 2
+
+ENV = gym.make('gym_STEMsim:STEMsim-beamcenter-v5')
+
 
 class ActorNet(nn.Module):
 
     def __init__(self):
         super(ActorNet, self).__init__()
-        self.fc = nn.Linear(3, 100)
-        self.mu_head = nn.Linear(100, 1)
+        self.fc = nn.Linear(INPUT_SIZE, HIDDEN_LAYER)
+        self.fc1 = nn.Linear(HIDDEN_LAYER, 64)
+        self.mu_head = nn.Linear(64, OUTPUT_SIZE)
 
     def forward(self, s):
         x = F.relu(self.fc(s))
-        u = 2.0 * F.tanh(self.mu_head(x))
+        x = F.relu(self.fc1(x))
+        u = 1 * F.tanh(self.mu_head(x))
         return u
 
 
@@ -50,11 +61,13 @@ class CriticNet(nn.Module):
 
     def __init__(self):
         super(CriticNet, self).__init__()
-        self.fc = nn.Linear(4, 100)
-        self.v_head = nn.Linear(100, 1)
+        self.fc = nn.Linear(6+2, HIDDEN_LAYER)
+        self.fc1 = nn.Linear(HIDDEN_LAYER, 64)
+        self.v_head = nn.Linear(64, 1)
 
     def forward(self, s, a):
         x = F.relu(self.fc(torch.cat([s, a], dim=1)))
+        x = F.relu(self.fc1(x))
         state_value = self.v_head(x)
         return state_value
 
@@ -97,8 +110,8 @@ class Agent():
         mu = self.eval_anet(state)
         dist = Normal(mu, torch.tensor(self.var, dtype=torch.float))
         action = dist.sample()
-        action.clamp(-2.0, 2.0)
-        return (action.item(),)
+        action = action.clamp(-1.0, 1.0)
+        return action[0].numpy().copy()
 
     def save_param(self):
         torch.save(self.eval_anet.state_dict(), 'param/ddpg_anet_params.pkl')
@@ -112,7 +125,7 @@ class Agent():
 
         transitions = self.memory.sample(32)
         s = torch.tensor([t.s for t in transitions], dtype=torch.float)
-        a = torch.tensor([t.a for t in transitions], dtype=torch.float).view(-1, 1)
+        a = torch.tensor([t.a for t in transitions], dtype=torch.float).view(-1, 2)
         r = torch.tensor([t.r for t in transitions], dtype=torch.float).view(-1, 1)
         s_ = torch.tensor([t.s_ for t in transitions], dtype=torch.float)
 
@@ -145,7 +158,7 @@ class Agent():
 
 
 def main():
-    env = gym.make('Pendulum-v0')
+    env = ENV
     env.seed(args.seed)
 
     agent = Agent()
@@ -155,10 +168,12 @@ def main():
     for i_ep in range(1000):
         score = 0
         state = env.reset()
-
-        for t in range(200):
+        done = False
+        ep_steps = 0
+        while not (done or ep_steps >200):
             action = agent.select_action(state)
             state_, reward, done, _ = env.step(action)
+            # print(action, state_)
             score += reward
             if args.render:
                 env.render()
@@ -166,7 +181,8 @@ def main():
             state = state_
             if agent.memory.isfull:
                 q = agent.update()
-                running_q = 0.99 * running_q + 0.01 * q
+                running_q = GAMMA * running_q + LR * q
+            ep_steps += 1
 
         running_reward = running_reward * 0.9 + score * 0.1
         training_records.append(TrainingRecord(i_ep, running_reward))
@@ -174,7 +190,7 @@ def main():
         if i_ep % args.log_interval == 0:
             print('Step {}\tAverage score: {:.2f}\tAverage Q: {:.2f}'.format(
                 i_ep, running_reward, running_q))
-        if running_reward > -200:
+        if running_reward > 70:
             print("Solved! Running reward is now {}!".format(running_reward))
             env.close()
             agent.save_param()
